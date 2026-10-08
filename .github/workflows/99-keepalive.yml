@@ -1,0 +1,55 @@
+name: 仓库保活（防定时任务被自动停用）
+
+# ─────────────────────────────────────────────────────────────
+# 为什么需要这个工作流：
+# GitHub 会在仓库连续 60 天没有任何「活动」时，自动停用该仓库里所有
+# schedule 定时工作流（状态变为 disabled_inactivity），并且不发送任何通知。
+# 本项目是 fork，代码同步后通常长期没有新提交，所以必然会被停用。
+#
+# 本工作流定时调用 GitHub API 重新启用目标工作流，重置 GitHub 的停用计时器。
+# 它：① 不产生任何假提交（不会让 fork 与上游分叉）② 不需要配置 PAT
+#   ③ 使用 Actions 自带的 GITHUB_TOKEN + actions: write 权限即可。
+#
+# 参考实现：https://github.com/liskin/gh-workflow-keepalive
+# ─────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # 每周一 UTC 03:00（北京时间 11:00），远早于 60 天阈值
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 重新启用定时工作流（重置 60 天停用计时）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          repo="${GITHUB_REPOSITORY}"
+          echo "仓库: $repo"
+          ok=0
+          for wf in 00-daily-analysis.yml network-smoke.yml 99-keepalive.yml; do
+            if gh api -X PUT "repos/${repo}/actions/workflows/${wf}/enable" >/dev/null 2>&1; then
+              echo "✅ 保活成功: ${wf}"
+              ok=$((ok + 1))
+            else
+              echo "⚠️ 未能启用: ${wf}（可能该文件不存在，忽略）"
+            fi
+          done
+          echo "------------------------------------------"
+          echo "本次保活完成，成功 ${ok} 个工作流"
+          if [ "${ok}" -eq 0 ]; then
+            echo "❌ 全部失败，请检查 GITHUB_TOKEN 的 actions: write 权限"
+            exit 1
+          fi
